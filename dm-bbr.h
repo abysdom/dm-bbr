@@ -25,9 +25,12 @@
  * this means that our software BBR will be only activated when all hardware
  * BBR replacement sectors have been used.
  */
-#if	LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,37)
+#ifndef	__KERNEL__
+#define	u32	__u32
+#define	u64	__u64
+#elif	LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,37)
 #define	DM_MSG_PREFIX	"bbr"
-#endif
+#endif	/* __KERNEL__ */
 
 #define BBR_TABLE_SIGNATURE		0x42627254 /* BbrT */
 #define BBR_ENTRIES_PER_SECT		31
@@ -76,6 +79,7 @@ struct bbr_table {
 	struct bbr_table_entry	entries[BBR_ENTRIES_PER_SECT];
 };
 
+#ifdef	__KERNEL__
 /**
  * struct bbr_runtime_remap
  *
@@ -126,4 +130,5 @@ struct bbr_private {
 	u32				blksize_in_sects;
 	atomic_t			in_use_replacement_blks;
 };
+#endif	/* __KERNEL__ */
 

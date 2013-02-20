@@ -38,6 +38,9 @@ obj-$(CONFIG_DM_LOG_USERSPACE)	+= dm-log-userspace.o
 obj-$(CONFIG_DM_ZERO)		+= dm-zero.o
 obj-$(CONFIG_DM_BBR)		+= dm-bbr.o
 
+hostprogs-$(CONFIG_DM_BBR)	+= dm-bbr-table
+always	:= $(hostprogs-y)
+
 ifeq ($(CONFIG_DM_UEVENT),y)
 dm-mod-objs			+= dm-uevent.o
 endif
