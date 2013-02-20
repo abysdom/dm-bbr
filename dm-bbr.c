@@ -1,5 +1,6 @@
 /*
  *   (C) Copyright IBM Corp. 2002, 2004
+ *   (C) Copyright Yang Yuanzhi 2013
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -33,21 +34,73 @@
 #include <linux/mempool.h>
 #include <linux/workqueue.h>
 #include <linux/vmalloc.h>
+#include <linux/version.h>
 
 #include "dm.h"
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 #include "dm-bio-list.h"
+#endif
 #include "dm-bio-record.h"
 #include "dm-bbr.h"
 #include "dm-io.h"
+#if	LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,37)
+typedef struct kmem_cache kmem_cache_t;
+#endif
 
 #define SECTOR_SIZE (1 << SECTOR_SHIFT)
 
 static struct workqueue_struct *dm_bbr_wq = NULL;
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 static void bbr_remap_handler(void *data);
+#else
+static void bbr_remap_handler(struct work_struct *data);
+#endif
 static kmem_cache_t *bbr_remap_cache;
 static kmem_cache_t *bbr_io_cache;
 static mempool_t *bbr_io_pool;
 
+#if	LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,37)
+int dm_io_sync(unsigned int num_regions, struct io_region *where, int rw,
+	struct page_list *pl, unsigned int offset, unsigned long *error_bits)
+{
+	struct dm_io_client *dic = dm_io_client_create(num_regions);
+	struct dm_io_request dir;
+	int rc;
+	
+	if (IS_ERR(dic))
+		return -ENOMEM;
+		
+	dir.bi_rw = rw;
+	dir.mem.type = DM_IO_PAGE_LIST;
+	dir.mem.ptr.pl = pl;
+	dir.mem.offset = offset;
+	dir.notify.fn = NULL;
+	dir.client = dic;
+	rc = dm_io(&dir, num_regions, where, error_bits);
+	dm_io_client_destroy(dic);
+	return rc;
+}
+
+int dm_io_sync_vm(unsigned int num_regions, struct io_region *where, int rw,
+	void *data, unsigned long *error_bits)
+{
+	struct dm_io_client *dic = dm_io_client_create(num_regions);
+	struct dm_io_request dir;
+	int rc;
+	
+	if (IS_ERR(dic))
+		return -ENOMEM;
+		
+	dir.bi_rw = rw;
+	dir.mem.type = DM_IO_VMA;
+	dir.mem.ptr.vma = data;
+	dir.notify.fn = NULL;
+	dir.client = dic;
+	rc = dm_io(&dir, num_regions, where, error_bits);
+	dm_io_client_destroy(dic);
+	return rc;
+}
+#endif	/* KERNEL_VERSION(2,6,37) */
 /**
  * bbr_binary_tree_destroy
  *
@@ -97,7 +150,11 @@ static struct bbr_private *bbr_alloc_private(void)
 	bbr_id = kmalloc(sizeof(*bbr_id), GFP_KERNEL);
 	if (bbr_id) {
 		memset(bbr_id, 0, sizeof(*bbr_id));
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 		INIT_WORK(&bbr_id->remap_work, bbr_remap_handler, bbr_id);
+#else
+		INIT_WORK(&bbr_id->remap_work, bbr_remap_handler);
+#endif
 		bbr_id->remap_root_lock = SPIN_LOCK_UNLOCKED;
 		bbr_id->remap_ios_lock = SPIN_LOCK_UNLOCKED;
 		bbr_id->in_use_replacement_blks = (atomic_t)ATOMIC_INIT(0);
@@ -530,12 +587,13 @@ static int bbr_io_remap_error(struct bbr_private *bbr_id,
 			bbr_table->in_use_cnt++;
 			bbr_table->sequence_number++;
 			bbr_table->crc = 0;
+			cpu_bbr_table_sector_to_le(bbr_table, bbr_table);
 			bbr_table->crc = calculate_crc(INITIAL_CRC,
 						       bbr_table,
 						       sizeof(struct bbr_table));
-
+			cpu_to_le32s(&bbr_table->crc);
+			
 			/* Write the table to disk. */
-			cpu_bbr_table_sector_to_le(bbr_table, bbr_table);
 			if (bbr_id->lba_table1) {
 				job.sector = bbr_id->lba_table1 + table_sector_offset;
 				rc = dm_io_sync_vm(1, &job, WRITE, bbr_table, &error);
@@ -603,7 +661,7 @@ static int bbr_io_process_request(struct bbr_private *bbr_id,
 	 * Treat each vector as a separate request.
 	 */
 	/* KMC: Is this the right way to walk the bvec list? */
-	for (i = 0;
+	for (i = bio->bi_idx;
 	     i < bio->bi_vcnt;
 	     i++, bio->bi_idx++, starting_lsn += count) {
 
@@ -713,7 +771,11 @@ static void bbr_io_process_requests(struct bbr_private *bbr_id,
 
 		rc = bbr_io_process_request(bbr_id, bio);
 
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 		bio_endio(bio, bio->bi_size, rc);
+#else
+		bio_endio(bio, rc);
+#endif
 
 		bio = next;
 	}
@@ -733,9 +795,18 @@ static void bbr_io_process_requests(struct bbr_private *bbr_id,
  * thread that doesn't need special processing will cause severe
  * performance degredation.
  **/
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 static void bbr_remap_handler(void *data)
+#else
+static void bbr_remap_handler(struct work_struct *data)
+#endif
 {
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 	struct bbr_private *bbr_id = data;
+#else
+	struct bbr_private *bbr_id = container_of(data, struct bbr_private,
+			remap_work);
+#endif
 	struct bio *bio;
 	unsigned long flags;
 
@@ -765,10 +836,10 @@ static int bbr_endio(struct dm_target *ti, struct bio *bio,
 		dm_bio_restore(bbr_io, bio);
 		map_context->ptr = NULL;
 
-		DMERR("dm-bbr: device %s: I/O failure on sector %lu. "
+		DMERR("dm-bbr: device %s: I/O failure on sector "PFU64". "
 		      "Scheduling for retry.",
 		      format_dev_t(b, bbr_id->dev->bdev->bd_dev),
-		      (unsigned long)bio->bi_sector);
+		      bio->bi_sector);
 
 		spin_lock_irqsave(&bbr_id->remap_ios_lock, flags);
 		bio_list_add(&bbr_id->remap_ios, bio);
@@ -822,8 +893,13 @@ static int bbr_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto out2;
 	}
 
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 	if (dm_get_device(ti, argv[0], 0, ti->len,
 			  dm_table_get_mode(ti->table), &bbr_id->dev)) {
+#else
+	if (dm_get_device(ti, argv[0], dm_table_get_mode(ti->table),
+		&bbr_id->dev)) {
+#endif
 		ti->error = "dm-bbr: Device lookup failed";
 		goto out2;
 	}
@@ -934,17 +1010,25 @@ int __init dm_bbr_init(void)
 		goto err1;
 	}
 
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 	bbr_remap_cache = kmem_cache_create("bbr-remap",
 					    sizeof(struct bbr_runtime_remap),
 					    0, SLAB_HWCACHE_ALIGN, NULL, NULL);
+#else
+	bbr_remap_cache = KMEM_CACHE(bbr_runtime_remap, SLAB_HWCACHE_ALIGN);
+#endif
 	if (!bbr_remap_cache) {
 		DMERR("dm-bbr: error creating remap cache.");
 		rc = ENOMEM;
 		goto err2;
 	}
 
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 	bbr_io_cache = kmem_cache_create("bbr-io", sizeof(struct dm_bio_details),
 					 0, SLAB_HWCACHE_ALIGN, NULL, NULL);
+#else
+	bbr_io_cache = KMEM_CACHE(dm_bio_details, SLAB_HWCACHE_ALIGN);
+#endif
 	if (!bbr_io_cache) {
 		DMERR("dm-bbr: error creating io cache.");
 		rc = ENOMEM;
@@ -966,16 +1050,20 @@ int __init dm_bbr_init(void)
 		goto err5;
 	}
 
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 	rc = dm_io_get(1);
 	if (rc) {
 		DMERR("dm-bbr: error initializing I/O service.");
 		goto err6;
 	}
+#endif
 
 	return 0;
 
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 err6:
 	destroy_workqueue(dm_bbr_wq);
+#endif
 err5:
 	mempool_destroy(bbr_io_pool);
 err4:
@@ -990,7 +1078,9 @@ err1:
 
 void __exit dm_bbr_exit(void)
 {
+#if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
 	dm_io_put(1);
+#endif
 	destroy_workqueue(dm_bbr_wq);
 	mempool_destroy(bbr_io_pool);
 	kmem_cache_destroy(bbr_io_cache);

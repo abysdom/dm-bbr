@@ -1,5 +1,6 @@
 /*
  *   (C) Copyright IBM Corp. 2002, 2004
+ *   (C) Copyright Yang Yuanzhi 2013
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -24,6 +25,9 @@
  * this means that our software BBR will be only activated when all hardware
  * BBR replacement sectors have been used.
  */
+#if	LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,37)
+#define	DM_MSG_PREFIX	"bbr"
+#endif
 
 #define BBR_TABLE_SIGNATURE		0x42627254 /* BbrT */
 #define BBR_ENTRIES_PER_SECT		31
