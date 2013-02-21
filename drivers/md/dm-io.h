@@ -8,6 +8,7 @@
 #ifndef _DM_IO_H
 #define _DM_IO_H
 
+#include <linux/version.h>
 #include "dm.h"
 
 #if	LINUX_VERSION_CODE < KERNEL_VERSION(2,6,37)
